@@ -1,0 +1,245 @@
+// 学習継続KPI可視化システム - データモデル
+// 目的: 学力評価を排除し、行動ログで継続を設計する
+// 注意: SQLiteではenumがサポートされないため、Stringで代用
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// ユーザー・認証
+// ============================================
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  emailVerified DateTime?
+  name          String
+  image         String?
+  role          String    @default("STUDENT") // STUDENT | TUTOR | PARENT
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // NextAuth relations
+  accounts      Account[]
+  sessions      Session[]
+
+  // LINE連携
+  lineUserId    String?   @unique
+
+  // Relations
+  dailyLogs      DailyLog[]
+  streak         Streak?
+  phaseState     PhaseState?
+  settings       Settings?
+  cheersReceived Cheer[]      @relation("CheerReceiver")
+  cheersSent     Cheer[]      @relation("CheerSender")
+
+  // 家庭教師が担当する生徒（家庭教師のみ）
+  students       User[]       @relation("TutorStudents")
+  tutor          User?        @relation("TutorStudents", fields: [tutorId], references: [id])
+  tutorId        String?
+
+  // 保護者が見守る生徒（保護者のみ）
+  children       User[]       @relation("ParentChildren")
+  parent         User?        @relation("ParentChildren", fields: [parentId], references: [id])
+  parentId       String?
+}
+
+// NextAuth用のアカウント（OAuth等）
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+// NextAuth用のセッション
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ============================================
+// 日次ログ（コアデータ）
+// ============================================
+
+model DailyLog {
+  id        String   @id @default(cuid())
+  date      DateTime @default(now()) // 日付（時刻部分は00:00:00）
+
+  // 選択式入力のみ（自由記述なし）
+  mood      String   @default("NORMAL")  // HIGH | NORMAL | LOW
+  effort    String   @default("CIRCLE")  // DOUBLE_CIRCLE | CIRCLE | TRIANGLE
+
+  // Relations
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tasks     TaskStatus[]
+
+  createdAt DateTime @default(now())
+
+  @@unique([userId, date])
+  @@index([userId])
+  @@index([date])
+}
+
+// ============================================
+// タスクステータス（科目別の実行有無）
+// ============================================
+
+model TaskStatus {
+  id        String   @id @default(cuid())
+
+  subject   String            // ENGLISH | MATH | SCIENCE | SOCIAL | JAPANESE
+  planned   Boolean @default(true)  // この日に予定されていたか
+  done      Boolean @default(false) // 完了したか（boolean のみ）
+
+  // Relations
+  dailyLogId String
+  dailyLog   DailyLog @relation(fields: [dailyLogId], references: [id], onDelete: Cascade)
+
+  @@unique([dailyLogId, subject])
+}
+
+// ============================================
+// ストリーク（継続記録）
+// ============================================
+
+model Streak {
+  id              String   @id @default(cuid())
+
+  count           Int      @default(0)    // 現在の連続日数
+  frozenCount     Int      @default(0)    // 凍結回数（リセットはしない）
+  maxCount        Int      @default(0)    // 過去最高の連続日数
+  lastClearDate   DateTime?              // 最後にクリアした日
+
+  // Relations
+  userId          String   @unique
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  updatedAt       DateTime @updatedAt
+}
+
+// ============================================
+// リスク評価（自動判定結果）
+// ============================================
+
+model RiskAssessment {
+  id          String   @id @default(cuid())
+
+  level       String   @default("LEVEL_0")  // LEVEL_0 | LEVEL_1 | LEVEL_2 | LEVEL_3
+  flags       String   @default("[]")       // JSON配列として保存
+  weekStart   DateTime                      // 評価対象週の開始日
+
+  generatedAt DateTime @default(now())
+
+  @@index([weekStart])
+}
+
+// ============================================
+// フェーズ状態（成長段階）
+// ============================================
+
+model PhaseState {
+  id          String   @id @default(cuid())
+
+  phase       String   @default("PHASE_0")  // PHASE_0 | PHASE_1 | PHASE_2 | PHASE_3
+  sinceDate   DateTime @default(now())      // このフェーズに入った日
+
+  // Relations
+  userId      String   @unique
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  updatedAt   DateTime @updatedAt
+}
+
+// ============================================
+// 設定（週次テンプレート・完了基準）
+// ============================================
+
+model Settings {
+  id                    String   @id @default(cuid())
+
+  // 週間テンプレート（JSON: 曜日ごとのplanned科目）
+  weeklyTemplate        String   @default("{}")
+
+  // 完了基準（JSON: 科目ごとの条件）
+  completionThresholds  String   @default("{}")
+
+  // 高校移行設定
+  isHighSchoolMode      Boolean  @default(false)
+  weekdayTemplate       String   @default("{}")  // 平日型
+  weekendTemplate       String   @default("{}")  // 週末型
+
+  // Relations
+  userId                String   @unique
+  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  updatedAt             DateTime @updatedAt
+}
+
+// ============================================
+// 応援（保護者→生徒）
+// ============================================
+
+model Cheer {
+  id          String   @id @default(cuid())
+
+  type        String   @default("WATCHING")  // WATCHING | GREAT | KEEP_GOING | PROUD | SUPPORT
+
+  // Relations
+  senderId    String
+  sender      User     @relation("CheerSender", fields: [senderId], references: [id], onDelete: Cascade)
+  receiverId  String
+  receiver    User     @relation("CheerReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
+
+  createdAt   DateTime @default(now())
+
+  @@index([receiverId])
+  @@index([createdAt])
+}
+
+// ============================================
+// 通知設定
+// ============================================
+
+model NotificationSettings {
+  id                    String   @id @default(cuid())
+
+  // 生徒向け
+  dailyReminder         Boolean  @default(true)
+  dailyReminderTime     String   @default("20:00")
+
+  // 家庭教師向け
+  weeklySummary         Boolean  @default(true)
+  highRiskAlert         Boolean  @default(true)
+
+  // 保護者向け（制限あり）
+  parentWeeklySummary   Boolean  @default(true)
+  parentHighRiskOnly    Boolean  @default(true)  // HIGH時のみ通知
+
+  userId                String   @unique
+
+  updatedAt             DateTime @updatedAt
+}
